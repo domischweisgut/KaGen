@@ -37,6 +37,7 @@ option(KAGEN_BUILD_TESTS "Build unit tests." OFF)
 option(KAGEN_BUILD_APPS "Build binaries." ON)
 option(KAGEN_BUILD_TOOLS "Build tools." ON)
 option(KAGEN_BUILD_EXAMPLES "Build examples." ON)
+option(KAGEN_BUILD_EXPERIMENTS "Build memory experiments." OFF)
 
 option(INSTALL_KAGEN "Install KaGen." ON)
 
@@ -212,10 +213,16 @@ else ()
     message(STATUS "Apps disabled.")
 endif ()
 
-if (KAGEN_BUILD_EXAMPLES) 
+if (KAGEN_BUILD_EXAMPLES)
     add_subdirectory(examples)
 else ()
     message(STATUS "Examples disabled.")
+endif ()
+
+if (KAGEN_BUILD_EXPERIMENTS)
+    add_subdirectory(experiments)
+else ()
+    message(STATUS "Experiments disabled.")
 endif ()
 
 ################################################################################
