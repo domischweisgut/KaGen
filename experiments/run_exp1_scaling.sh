@@ -8,27 +8,28 @@
 # Output: results/exp1_scaling.csv
 #
 # Usage:
-#   ./run_exp1_scaling.sh [BINARY] [NUM_PES]
+#   ./run_exp1_scaling.sh [BINARY]
 #
 #   BINARY   path to the compiled memory_benchmark binary
 #            (default: ../build/experiments/memory_benchmark)
-#   NUM_PES  number of MPI processes (default: 1)
+#
+# Note: always runs with a single MPI process (np=1). Parallelism is not
+# the goal of these benchmarks.
 # =============================================================================
 
 set -euo pipefail
 
 BINARY="${1:-../build/experiments/memory_benchmark}"
-NUM_PES="${2:-1}"
 OUTPUT="results/exp1_scaling.csv"
 LOGFILE="results/exp1_scaling.log"
 
-# Streaming chunk counts to test (in addition to inmemory mode)
-STREAMING_CHUNKS=(8 32 128)
+# Fixed streaming chunk count for the in-memory vs. streaming comparison
+STREAMING_CHUNKS=(32)
 
-# Range of N: n = 2^N nodes; sweep from 2^12 (4K) to 2^26 (64M)
-N_MIN=12
-N_MAX=26
-N_STEP=2
+# Range of N: n = 2^N nodes; sweep from 2^20 (~1M) to 2^24 (~16M)
+N_MIN=20
+N_MAX=24
+N_STEP=1
 
 # Average degree kept constant for all sizes (M = N + log2(avg_deg/2))
 # avg_deg = 16  ->  m = 8 * n  ->  log2(m) = N + 3
@@ -44,7 +45,7 @@ mkdir -p results
 echo "Logging to $LOGFILE"
 
 # Write CSV header
-echo "options,mode,chunks,peak_rss_bytes,baseline_rss_bytes,wall_sec,edge_count,num_pes" \
+echo "options,mode,chunks,peak_rss_bytes,baseline_rss_bytes,init_sec,stream_sec,wall_sec,edge_count,num_pes" \
     > "$OUTPUT"
 
 run_one() {
@@ -55,7 +56,7 @@ run_one() {
     echo "  [$(date +%H:%M:%S)] mode=$mode k=$k  $options" | tee -a "$LOGFILE"
 
     local result
-    if result=$(mpirun -np "$NUM_PES" "$BINARY" "$options" "$mode" "$k" 2>>"$LOGFILE"); then
+    if result=$(mpirun -np 1 "$BINARY" "$options" "$mode" "$k" 2>>"$LOGFILE"); then
         echo "$result" >> "$OUTPUT"
     else
         echo "  WARNING: run failed (see $LOGFILE)" >&2
@@ -107,10 +108,61 @@ done
 echo "" | tee -a "$LOGFILE"
 echo "=== RGG2D ===" | tee -a "$LOGFILE"
 for N in $(seq "$N_MIN" "$N_STEP" "$N_MAX"); do
-    # Compute radius in Python (bc lacks sqrt / pi)
     R=$(python3 -c "import math; print(f'{math.sqrt(16.0 / (2**${N} * math.pi)):.8f}')")
     OPTIONS="rgg2d;N=${N};r=${R}"
     echo "N=$N  r=$R" | tee -a "$LOGFILE"
+
+    run_one "$OPTIONS" "inmemory" 1
+
+    for k in "${STREAMING_CHUNKS[@]}"; do
+        run_one "$OPTIONS" "streaming" "$k"
+    done
+done
+
+# ---------------------------------------------------------------------------
+# Generator 4: BA (Barabási-Albert preferential attachment)
+# d = avg_deg / 2 = 8 (each new node attaches to d existing nodes)
+# ---------------------------------------------------------------------------
+echo "" | tee -a "$LOGFILE"
+echo "=== BA ===" | tee -a "$LOGFILE"
+BA_D=8
+for N in $(seq "$N_MIN" "$N_STEP" "$N_MAX"); do
+    OPTIONS="ba;N=${N};d=${BA_D}"
+    echo "N=$N  d=$BA_D" | tee -a "$LOGFILE"
+
+    run_one "$OPTIONS" "inmemory" 1
+
+    for k in "${STREAMING_CHUNKS[@]}"; do
+        run_one "$OPTIONS" "streaming" "$k"
+    done
+done
+
+# ---------------------------------------------------------------------------
+# Generator 5: Grid2D (square grid, all edges present)
+# Pass N directly; the generator computes grid_x = grid_y = sqrt(2^N) internally.
+# ---------------------------------------------------------------------------
+echo "" | tee -a "$LOGFILE"
+echo "=== Grid2D ===" | tee -a "$LOGFILE"
+for N in $(seq "$N_MIN" "$N_STEP" "$N_MAX"); do
+    OPTIONS="grid2d;N=${N};p=1"
+    echo "N=$N  (grid auto-dims: sqrt(2^N) x sqrt(2^N))" | tee -a "$LOGFILE"
+
+    run_one "$OPTIONS" "inmemory" 1
+
+    for k in "${STREAMING_CHUNKS[@]}"; do
+        run_one "$OPTIONS" "streaming" "$k"
+    done
+done
+
+# ---------------------------------------------------------------------------
+# Generator 6: RDG2D (Delaunay triangulation) — requires CGAL at build time.
+# Skip silently if the generator reports an error.
+# ---------------------------------------------------------------------------
+echo "" | tee -a "$LOGFILE"
+echo "=== RDG2D (Delaunay, requires CGAL) ===" | tee -a "$LOGFILE"
+for N in $(seq "$N_MIN" "$N_STEP" "$N_MAX"); do
+    OPTIONS="rdg2d;N=${N}"
+    echo "N=$N" | tee -a "$LOGFILE"
 
     run_one "$OPTIONS" "inmemory" 1
 

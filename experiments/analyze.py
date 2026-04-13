@@ -11,8 +11,13 @@ Usage:
 Figures produced (saved in results/figures/):
     exp1_scaling_{generator}.pdf  – memory vs graph size per generator
     exp1_scaling_combined.pdf     – all generators on one canvas
+    exp1_timing.pdf               – wall time vs graph size
     exp2_chunks.pdf               – memory vs chunk count with O(1/k) reference
-    exp3_generators.pdf           – cross-generator bar chart
+    exp2_chunks_ratio.pdf         – memory reduction ratio vs chunk count
+    exp2_timing.pdf               – wall time vs chunk count
+    exp2_timing_breakdown.pdf     – init vs stream time breakdown vs chunk count
+    exp3_size_scaling.pdf         – memory vs graph size (streaming only, k=32)
+    exp3_timing_breakdown.pdf     – init vs stream time vs graph size
 """
 
 import argparse
@@ -93,6 +98,11 @@ def load_csv(path: Path) -> pd.DataFrame:
                   else f"streaming_{int(r['chunks'])}",
         axis=1,
     )
+    # Per-phase timing columns (present in new benchmark output; default to 0 if absent)
+    if "init_sec" not in df.columns:
+        df["init_sec"] = 0.0
+    if "stream_sec" not in df.columns:
+        df["stream_sec"] = df.get("wall_sec", 0.0)
     return df
 
 
@@ -288,69 +298,91 @@ def plot_exp2(df: pd.DataFrame, fmt: str, show: bool):
 
 
 # ---------------------------------------------------------------------------
-# Experiment 3 – Cross-generator comparison
+# Experiment 3 – Streaming scalability: fixed k=32, sweep n
 # ---------------------------------------------------------------------------
 
 def plot_exp3(df: pd.DataFrame, fmt: str, show: bool):
+    """Line plots of peak RSS and timing vs. graph size (streaming only, k=32)."""
     if df.empty:
         return
 
     generators = df["generator"].unique()
-    x = np.arange(len(generators))
-    width = 0.18
+    stream_color = COLORS["streaming_32"]
 
-    # Series to display
-    series_to_plot = ["inmemory", "streaming_8", "streaming_32", "streaming_128"]
+    # --- Memory scaling ---
+    ncols = min(3, len(generators))
+    nrows = math.ceil(len(generators) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
+                              squeeze=False, sharey=False)
+    fig.suptitle("Streaming Memory Scaling  (k=32, avg degree ≈ 16)", fontsize=13)
 
-    fig, ax = plt.subplots(figsize=(max(8, 2 * len(generators)), 5))
-    ax.set_title("Peak RSS by Generator  (N=20, avg degree ≈ 16)", fontsize=12)
-
-    for si, series in enumerate(series_to_plot):
-        rss_vals = []
-        for gen in generators:
-            row = df[(df["generator"] == gen) & (df["series"] == series)]
-            rss_vals.append(row["peak_rss_mib"].values[0] if not row.empty else 0)
-
-        offset = (si - len(series_to_plot) / 2 + 0.5) * width
-        ax.bar(x + offset, rss_vals, width=width * 0.9,
-               label=MODE_LABEL.get(series, series),
-               color=COLORS.get(series, "gray"))
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(generators, rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel("Peak RSS (MiB)")
-    ax.set_yscale("log")
-    ax.legend(fontsize=9, loc="upper right")
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    save_fig(fig, "exp3_generators", fmt)
-
-    # --- Table: reduction factor per generator ---
-    print("\n--- Generator comparison: memory reduction factor (inmemory / streaming) ---")
-    print(f"{'Generator':<25} {'In-mem (MiB)':>14}", end="")
-    for s in ["streaming_8", "streaming_32", "streaming_128"]:
-        print(f"  {MODE_LABEL.get(s, s):>18}", end="")
-    print()
-
-    for gen in generators:
-        sub = df[df["generator"] == gen]
-        im  = sub[sub["series"] == "inmemory"]["peak_rss_mib"]
-        if im.empty:
+    for idx, gen in enumerate(generators):
+        ax = axes[idx // ncols][idx % ncols]
+        sub = df[df["generator"] == gen].sort_values("N")
+        if sub.empty:
+            ax.set_visible(False)
             continue
-        im_rss = im.values[0]
-        print(f"{gen:<25} {im_rss:>14.1f}", end="")
-        for s in ["streaming_8", "streaming_32", "streaming_128"]:
-            row = sub[sub["series"] == s]["peak_rss_mib"]
-            if not row.empty:
-                ratio = im_rss / row.values[0]
-                print(f"  {ratio:>17.1f}x", end="")
-            else:
-                print(f"  {'N/A':>17}", end="")
-        print()
 
+        ax.plot(sub["N"], sub["peak_rss_mib"], marker="o", color=stream_color,
+                linewidth=1.8, markersize=4, label="Streaming k=32")
+
+        # Theoretical O(m/k) reference anchored at the first data point
+        ns = sub["N"].dropna().values.astype(int)
+        if len(ns):
+            theory_mib = bytes_to_mib(16 * 8 * 2.0 ** np.sort(ns) / 32)
+            ax.plot(np.sort(ns), theory_mib, color="black", linestyle=":",
+                    linewidth=1, label="Theoretical O(m/k)")
+
+        ax.set_title(gen, fontsize=10)
+        ax.set_xlabel("log₂(n)  [N]")
+        ax.set_ylabel("Peak RSS (MiB)")
+        ax.set_yscale("log")
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(2))
+        ax.legend(fontsize=7, loc="upper left")
+        ax.grid(True, which="both", alpha=0.3)
+
+    for idx in range(len(generators), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.tight_layout()
+    save_fig(fig, "exp3_size_scaling", fmt)
     if show:
         plt.show()
     plt.close(fig)
+
+    # --- Timing breakdown: init vs stream ---
+    fig2, axes2 = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
+                                squeeze=False, sharey=False)
+    fig2.suptitle("Streaming Time Breakdown  (k=32)", fontsize=13)
+
+    for idx, gen in enumerate(generators):
+        ax = axes2[idx // ncols][idx % ncols]
+        sub = df[df["generator"] == gen].sort_values("N")
+        if sub.empty:
+            ax.set_visible(False)
+            continue
+
+        ax.plot(sub["N"], sub["init_sec"], marker="s", color="#984ea3",
+                linewidth=1.8, markersize=4, linestyle="--", label="Init")
+        ax.plot(sub["N"], sub["stream_sec"], marker="o", color=stream_color,
+                linewidth=1.8, markersize=4, label="Stream")
+
+        ax.set_title(gen, fontsize=10)
+        ax.set_xlabel("log₂(n)  [N]")
+        ax.set_ylabel("Time (s)")
+        ax.set_yscale("log")
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(2))
+        ax.legend(fontsize=7)
+        ax.grid(True, which="both", alpha=0.3)
+
+    for idx in range(len(generators), nrows * ncols):
+        axes2[idx // ncols][idx % ncols].set_visible(False)
+
+    fig2.tight_layout()
+    save_fig(fig2, "exp3_timing_breakdown", fmt)
+    if show:
+        plt.show()
+    plt.close(fig2)
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +391,7 @@ def plot_exp3(df: pd.DataFrame, fmt: str, show: bool):
 
 def plot_timing(df: pd.DataFrame, title: str, x_col: str, xlabel: str,
                 fmt: str, name: str, show: bool):
+    """Wall-clock time per series vs. an x-axis column (N or chunks)."""
     if df.empty or "wall_sec" not in df.columns:
         return
 
@@ -386,6 +419,48 @@ def plot_timing(df: pd.DataFrame, title: str, x_col: str, xlabel: str,
         ax.set_title(gen, fontsize=10)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Wall time (s)")
+        ax.set_yscale("log")
+        ax.legend(fontsize=7)
+        ax.grid(True, which="both", alpha=0.3)
+
+    fig.tight_layout()
+    save_fig(fig, name, fmt)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_timing_breakdown(df: pd.DataFrame, title: str, x_col: str, xlabel: str,
+                          fmt: str, name: str, show: bool):
+    """Init vs. stream time breakdown for streaming rows only."""
+    if df.empty:
+        return
+
+    st = df[df["mode"] == "streaming"]
+    if st.empty:
+        return
+
+    generators = st["generator"].unique()
+
+    fig, axes = plt.subplots(1, len(generators),
+                              figsize=(5 * len(generators), 4),
+                              squeeze=False)
+    fig.suptitle(title, fontsize=13)
+
+    for idx, gen in enumerate(generators):
+        ax = axes[0][idx]
+        sub = st[st["generator"] == gen].sort_values(x_col)
+        if sub.empty:
+            continue
+
+        ax.plot(sub[x_col], sub["init_sec"], marker="s", color="#984ea3",
+                linewidth=1.8, markersize=4, linestyle="--", label="Init")
+        ax.plot(sub[x_col], sub["stream_sec"], marker="o", color="#377eb8",
+                linewidth=1.8, markersize=4, label="Stream")
+
+        ax.set_title(gen, fontsize=10)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Time (s)")
         ax.set_yscale("log")
         ax.legend(fontsize=7)
         ax.grid(True, which="both", alpha=0.3)
@@ -430,11 +505,14 @@ def main():
         plot_exp2(df2, args.format, args.show)
         plot_timing(df2, "Generation Time vs Chunk Count", "chunks", "Chunk count (k)",
                     args.format, "exp2_timing", args.show)
+        plot_timing_breakdown(df2, "Init vs Stream Time vs Chunk Count",
+                              "chunks", "Chunk count (k)",
+                              args.format, "exp2_timing_breakdown", args.show)
 
     # ---- Experiment 3 ----
     if run_all or args.exp == 3:
-        print("\n=== Experiment 3: Generators ===")
-        df3 = load_csv(RESULTS_DIR / "exp3_generators.csv")
+        print("\n=== Experiment 3: Size Scaling ===")
+        df3 = load_csv(RESULTS_DIR / "exp3_size_scaling.csv")
         plot_exp3(df3, args.format, args.show)
 
     print("\nAll done.")

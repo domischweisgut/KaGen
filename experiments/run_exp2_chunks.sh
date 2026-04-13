@@ -11,19 +11,21 @@
 # Output: results/exp2_chunks.csv
 #
 # Usage:
-#   ./run_exp2_chunks.sh [BINARY] [NUM_PES]
+#   ./run_exp2_chunks.sh [BINARY]
+#
+# Note: always runs with a single MPI process (np=1). Parallelism is not
+# the goal of these benchmarks.
 # =============================================================================
 
 set -euo pipefail
 
 BINARY="${1:-../build/experiments/memory_benchmark}"
-NUM_PES="${2:-1}"
 OUTPUT="results/exp2_chunks.csv"
 LOGFILE="results/exp2_chunks.log"
 
 # Fixed graph size: 2^N nodes, 2^M edges  (avg degree 16)
-N=22
-M=25   # N + 3 → avg deg 16
+N=26
+M=29   # N + 3 → avg deg 16
 
 # Chunk counts to sweep (powers of 2)
 CHUNK_COUNTS=(1 2 4 8 16 32 64 128 256 512)
@@ -35,7 +37,7 @@ fi
 
 mkdir -p results
 
-echo "options,mode,chunks,peak_rss_bytes,baseline_rss_bytes,wall_sec,edge_count,num_pes" \
+echo "options,mode,chunks,peak_rss_bytes,baseline_rss_bytes,init_sec,stream_sec,wall_sec,edge_count,num_pes" \
     > "$OUTPUT"
 
 run_one() {
@@ -44,7 +46,7 @@ run_one() {
     local k="$3"
     echo "  [$(date +%H:%M:%S)] mode=$mode k=$k  $options" | tee -a "$LOGFILE"
     local result
-    if result=$(mpirun -np "$NUM_PES" "$BINARY" "$options" "$mode" "$k" 2>>"$LOGFILE"); then
+    if result=$(mpirun -np 1 "$BINARY" "$options" "$mode" "$k" 2>>"$LOGFILE"); then
         echo "$result" >> "$OUTPUT"
     else
         echo "  WARNING: run failed (see $LOGFILE)" >&2
@@ -90,6 +92,32 @@ run_one "$RGG_OPTS" "inmemory" 1
 
 for k in "${CHUNK_COUNTS[@]}"; do
     run_one "$RGG_OPTS" "streaming" "$k"
+done
+
+# ---------------------------------------------------------------------------
+# BA (Barabási-Albert)
+# ---------------------------------------------------------------------------
+echo "" | tee -a "$LOGFILE"
+echo "=== BA  N=$N d=8 ===" | tee -a "$LOGFILE"
+BA_OPTS="ba;N=${N};d=8"
+
+run_one "$BA_OPTS" "inmemory" 1
+
+for k in "${CHUNK_COUNTS[@]}"; do
+    run_one "$BA_OPTS" "streaming" "$k"
+done
+
+# ---------------------------------------------------------------------------
+# Grid2D
+# ---------------------------------------------------------------------------
+echo "" | tee -a "$LOGFILE"
+echo "=== Grid2D  N=$N (auto-dims: sqrt(2^N) x sqrt(2^N)) ===" | tee -a "$LOGFILE"
+GRID_OPTS="grid2d;N=${N};p=1"
+
+run_one "$GRID_OPTS" "inmemory" 1
+
+for k in "${CHUNK_COUNTS[@]}"; do
+    run_one "$GRID_OPTS" "streaming" "$k"
 done
 
 echo ""

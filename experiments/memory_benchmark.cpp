@@ -12,7 +12,7 @@
  *   [chunks]          Chunks per PE for streaming mode (default: 32)
  *
  * Output (CSV row, stdout, only from rank 0):
- *   options,mode,chunks,peak_rss_bytes,wall_sec,edge_count,num_pes
+ *   options,mode,chunks,peak_rss_bytes,baseline_rss_bytes,init_sec,stream_sec,wall_sec,edge_count,num_pes
  */
 
 #include <kagen.h>
@@ -63,22 +63,36 @@ int main(int argc, char* argv[]) {
     const long rss_baseline = GetPeakRSSBytes();
 
     unsigned long long edge_count = 0;
+    double init_sec = 0.0, stream_sec = 0.0;
 
-    const auto t_start = std::chrono::steady_clock::now();
+    using Clock = std::chrono::steady_clock;
 
     if (mode == "streaming") {
         kagen::sKaGen gen(options, chunks, MPI_COMM_WORLD);
+
+        const auto t0 = Clock::now();
         gen.Initialize();
+        const auto t1 = Clock::now();
         gen.StreamEdges(
             [&](kagen::SInt /*u*/, kagen::SInt /*v*/) { ++edge_count; },
             kagen::StreamingMode::ALL
         );
+        const auto t2 = Clock::now();
+
+        init_sec   = std::chrono::duration<double>(t1 - t0).count();
+        stream_sec = std::chrono::duration<double>(t2 - t1).count();
 
     } else if (mode == "inmemory") {
         kagen::KaGen gen(MPI_COMM_WORLD);
         gen.EnableOutput(false); // suppress built-in timing/statistics output
-        kagen::Graph graph         = gen.GenerateFromOptionString(options);
+
+        const auto t0 = Clock::now();
+        kagen::Graph graph = gen.GenerateFromOptionString(options);
+        const auto t1 = Clock::now();
+
         edge_count = static_cast<unsigned long long>(graph.NumberOfLocalEdges());
+        // No API-level init/stream split for in-memory; attribute all time to stream_sec.
+        stream_sec = std::chrono::duration<double>(t1 - t0).count();
 
     } else {
         if (rank == 0) {
@@ -89,36 +103,45 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const auto t_end   = std::chrono::steady_clock::now();
-    const double wall  = std::chrono::duration<double>(t_end - t_start).count();
+    const double wall = init_sec + stream_sec;
     const long   rss   = GetPeakRSSBytes();
 
-    // Aggregate across all PEs: max RSS (worst-case PE), sum of edges.
+    // Aggregate across all PEs: max RSS (worst-case PE), max times, sum of edges.
     long               global_rss_max   = 0;
     long               global_rss_base  = 0;
     unsigned long long global_edges     = 0;
+    double             global_init_sec  = 0.0;
+    double             global_stream_sec = 0.0;
+    double             global_wall      = 0.0;
 
-    MPI_Reduce(&rss,          &global_rss_max,  1, MPI_LONG,               MPI_MAX, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&rss_baseline, &global_rss_base, 1, MPI_LONG,               MPI_MAX, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&edge_count,   &global_edges,    1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&rss,          &global_rss_max,    1, MPI_LONG,               MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&rss_baseline, &global_rss_base,   1, MPI_LONG,               MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&edge_count,   &global_edges,      1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&init_sec,     &global_init_sec,   1, MPI_DOUBLE,             MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&stream_sec,   &global_stream_sec, 1, MPI_DOUBLE,             MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&wall,         &global_wall,       1, MPI_DOUBLE,             MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         // CSV columns:
-        //   options          – the options string (quoted)
-        //   mode             – inmemory | streaming
-        //   chunks           – chunks parameter (1 for inmemory runs)
-        //   peak_rss_bytes   – max peak RSS across PEs (bytes)
+        //   options            – the options string (quoted)
+        //   mode               – inmemory | streaming
+        //   chunks             – chunks parameter (1 for inmemory runs)
+        //   peak_rss_bytes     – max peak RSS across PEs (bytes)
         //   baseline_rss_bytes – RSS before generation (bytes), for delta computation
-        //   wall_sec         – wall-clock seconds for generation
-        //   edge_count       – total edges across all PEs
-        //   num_pes          – MPI communicator size
+        //   init_sec           – time for Initialize() phase (0 for inmemory)
+        //   stream_sec         – time for StreamEdges() / GenerateFromOptionString()
+        //   wall_sec           – total wall-clock seconds (init_sec + stream_sec)
+        //   edge_count         – total edges across all PEs
+        //   num_pes            – MPI communicator size
         std::cout
             << '"' << options << '"' << ','
             << mode << ','
             << chunks << ','
             << global_rss_max << ','
             << global_rss_base << ','
-            << wall << ','
+            << global_init_sec << ','
+            << global_stream_sec << ','
+            << global_wall << ','
             << global_edges << ','
             << size << '\n';
     }
