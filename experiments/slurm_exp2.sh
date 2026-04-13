@@ -6,6 +6,7 @@
 #SBATCH --time=05:00:00
 #SBATCH --output=results/exp2_%j.out
 #SBATCH --error=results/exp2_%j.err
+#SBATCH --exclusive
 
 # Experiment 2: Fixed graph size (N=26, ~67M nodes), sweep chunk count k in {1..512}
 # Generators: GNM, RHG, RGG2D, BA, Grid2D

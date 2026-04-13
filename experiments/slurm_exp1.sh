@@ -6,6 +6,7 @@
 #SBATCH --time=05:00:00
 #SBATCH --output=results/exp1_%j.out
 #SBATCH --error=results/exp1_%j.err
+#SBATCH --exclusive
 
 # Experiment 1: In-memory vs. streaming memory scaling with graph size
 # N in {20..24}, k=32, generators: GNM, RHG, RGG2D, BA, Grid2D, RDG2D
